@@ -61,6 +61,14 @@ def icp(A, B, max_iterations=20, tolerance=0.001):
 
 from simpleicp import PointCloud, SimpleICP
 import numpy as np
+from .curvature_estimation import CurvatureEstimator
+from PIL import Image 
+import os
+
+curve_estimator = CurvatureEstimator.CurvatureEstimator()
+
+frames_dir = '../Aufnahmen/data/raw/'
+testframe1 = Image.open(os.path.join(frames_dir, 'frame_0001.png'))
 
 # Read point clouds from xyz files into n-by-3 numpy arrays
 X_fix = np.genfromtxt("bunny_part1.xyz")

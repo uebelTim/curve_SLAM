@@ -14,8 +14,8 @@ class pose:
         gamma: yaw rate
         delta_t: time interval
         '''
-        self.x = self.x + v * delta_t * np.cos(self.theta)
-        self.y = self.y + v * delta_t * np.sin(self.theta)
+        self.x = self.x + v * delta_t * np.cos(np.radians(self.theta))
+        self.y = self.y + v * delta_t * np.sin(np.radians(self.theta))
         self.theta = self.theta + gamma * delta_t
         
     def get_pose(self):
