@@ -19,6 +19,7 @@ from skimage.draw import polygon
 import natsort 
 from collections import deque
 import math
+from scipy.ndimage import gaussian_filter
 
 
 #get path of this file
@@ -34,111 +35,70 @@ class CurvatureEstimator:
             self.model = YOLO(f'{HOME}/models/LaneSegmYolov8n/weights/best.pt')
         self.curvature = 0
         self.radius = 0
-        self.cp = None
-        self.lanelines = None
         self.lateral_offset = None
-        self.heading_angle = 0
-        
+        self.heading_angle = None
+
     
     #main function; call once per frame; then get required values with getters
     def process_frame(self,frame,debug=False):
         global DEBUG
         DEBUG=debug
         if DEBUG:
-            #show frame
             plt.imshow(frame)
             plt.title('frame')
             plt.show()
         self._frame = frame
-        #try:
-        if self.mode == 'otsu':
-            middle_line = self.get_middleLine_Otsu(frame)
-        elif self.mode == 'yolo':
-            middle_line = self.get_middleLine_YOLO(frame)
-        if len(middle_line) == 0:
-            self.curvature = np.nan
-            self.radius = np.nan
-            self.cp = None
-            return
-        endpoints = self.get_endpoints(middle_line)
-        radius,cp = self.calculate_curvature(middle_line,endpoints)
-        self.radius = radius
-        self.cp = cp
-        self.curvature = 1/radius
         
-        self._endpoints = endpoints
+        cv2.morphologyEx(frame, cv2.MORPH_CLOSE, np.ones((5,5),np.uint8))
+        #otsu = self.otsuThresholding(img,thresh=240)
+        frame = cv2.resize(frame,(640,640))
+        M,dsize =  self.get_birdview_matrix(frame)
+        birdview_frame =  self.transform_img_to_birdview(frame,M,dsize)
+        self._birdview_img = birdview_frame
+        middle_line, poly_coeffs = self.calculate_middle_line(birdview_frame)
         self._middle_line = middle_line
+        radius = self.calculate_radius(middle_line,birdview_frame)
+        self.radius = radius
+        lateral_offset = self.calculate_lateral_offset(middle_line,birdview_frame)
+        self.lateral_offset = lateral_offset
+        heading_angle = self.calculate_heading_angle(middle_line, birdview_frame, poly_coeffs)
+        self.heading_angle = heading_angle
+        print('heading angle: ',heading_angle)
+        
+        
+ 
 
-        # except Exception as e:
-        #     print('Error in curvature estimation')
-        #     print(e)
-        #     self.curvature = np.nan
-        #     self.radius = np.nan
-        #     self.cp = None
-            
+        
         
     def get_curvature(self,debug=False):
-        if debug or DEBUG:
-            self.show_estimated_circle(self.birdview_img,self._endpoints,self._middle_line,self.radius,self.cp)
-        return self.curvature
+        if debug and not DEBUG:
+           self.show_estimated_circle(self._birdview_img, self._endpoints, self._middle_line, self.radius, self._cp, self._mp)
+        radius = self.get_radius()
+        curvature = 1/radius
+        return curvature
+    
+    def get_radius(self):
+        radius = self.radius
+        #set max radius to +- 10_000
+        radius = radius if abs(radius) < 10_000 else 10_000 if radius > 0 else -10_000
+        #set min radius to +- 80 which is smallest possible radius for track (is 0.5m)
+        radius = radius if abs(radius) > 80 else 80 if radius > 0 else -80
+        print('corrected radius: ',radius)
+        #convert radius from pixels to meter
+        #track width is 120 Pixel wich is 0.75m
+        radius = radius /120 *0.75
+        return radius
     
     def get_lateral_offset(self):
-        return self.lateral_offset
+        offset = self.lateral_offset
+        #convert offset from pixels to meter
+        offset = -offset/120 *0.75
+        return offset
     
     def get_heading_angle(self):
         return self.heading_angle
     
-    def get_radius(self):
-        return self.radius
-    
-    def get_cp(self):
-        return self.cp
-    
-    def get_lanelines(self,nr_points=50):
-        left = self.get_contour_pixels(self.left)
-        right = self.get_contour_pixels(self.right)
-        left,right = self.equalize_pixel_lines(left,right,nr_points=nr_points)
-        return [left,right]
-        
-    #expects a frame in grayscale
-    def get_middleLine_Otsu(self,frame):
-        #closing
-        cv2.morphologyEx(frame, cv2.MORPH_CLOSE, np.ones((5,5),np.uint8))
-        #otsu = self.otsuThresholding(img,thresh=240)
-        frame = cv2.resize(frame,(640,640))
-        M,dsize,borderlines =  self.get_birdview_matrix(frame,CT=0.4,CB=0.0)
-        birdview_frame =  self.transform_img_to_birdview(frame,M,dsize)
-        self.birdview_img = birdview_frame
-        _, binary_image = cv2.threshold(birdview_frame, 150, 1, cv2.THRESH_BINARY)
-        left,right,middle_line = self.find_lane_lines_fast(binary_image)
-        if left is not None:
-            left = np.array(left,dtype=np.int32)
-        if right is not None:
-            right = np.array(right,dtype=np.int32)
-        self.lanelines = [left,right]
-        height, width = birdview_frame.shape[:2]
-        middle_line_smooth, poly_coeffs = self.fit_polynomial(middle_line,degree=2,max_height=height)
-        middle_line_smooth = np.array(middle_line_smooth,dtype=np.int32)
-        heading_angle = self.calculate_heading_angle(middle_line_smooth,birdview_frame,poly_coeffs)
-        lateral_offset = self.calculate_lateral_offset(middle_line_smooth,birdview_frame)
-        self.lateral_offset = lateral_offset
-        self.heading_angle = self.heading_angle + heading_angle
-        
-        if DEBUG:
-            img_birdview = cv2.cvtColor(birdview_frame, cv2.COLOR_GRAY2RGB)
-            if left is not None and len(left) > 0:
-                cv2.polylines(img_birdview, [left], False, (255,0,0), 2)
-            if right is not None and len(right) > 0:
-                cv2.polylines(img_birdview, [right], False, (255,0,0), 2)
-            if middle_line is not None and len(middle_line) > 0:
-                cv2.polylines(img_birdview, [middle_line], False, (0,0,255), 2)
-            if middle_line_smooth is not None and len(middle_line_smooth) > 0:
-                cv2.polylines(img_birdview, [middle_line_smooth], False, (0,255,0), 2)
-            plt.imshow(img_birdview)
-            plt.title('lines in birdview')
-            plt.show()
-            
-        return middle_line_smooth
+
     
     def otsuThresholding(self,img, thresh=0, maxval=255):
         img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
@@ -151,7 +111,7 @@ class CurvatureEstimator:
         return otsu[1]
     
     #Transform to birdeye view
-    def get_birdview_matrix(self,img, CT=0.52, CB=0.0, CH=0.3, CW=0.85):
+    def get_birdview_matrix(self,img, CT=0.52, CB=0.0, CH=0.30, CW=0.85):
         #Groesse und Punkte des Ausgangsbildes
         if len(img.shape) == 3:
             (hoeheOrg,breiteOrg,tiefeOrg) = img.shape
@@ -181,19 +141,18 @@ class CurvatureEstimator:
         #imgTrans = cv2.warpPerspective(img, M, dsize,borderMode=cv2.BORDER_CONSTANT, borderValue=borderColor)
         #get line equation of birdview borders
         #left line
-        l = [(goal_top_Left[1],goal_top_Left[0]),(goal_bottom_Left[1],goal_bottom_Left[0])]
-        r = [(goal_top_Right[1],goal_top_Right[0]),(goal_bottom_Right[1],goal_bottom_Right[0])]
-        return M, dsize,[l,r]
-    
-    def transform_img_to_birdview(self,img,M,dsize,borderColor=[0,0,0]):
+        # l = [(goal_top_Left[1],goal_top_Left[0]),(goal_bottom_Left[1],goal_bottom_Left[0])]
+        # r = [(goal_top_Right[1],goal_top_Right[0]),(goal_bottom_Right[1],goal_bottom_Right[0])]
+        return M, dsize
+
+    def transform_img_to_birdview(self, img,M,dsize,borderColor=[0,0,0]):
         img = img.squeeze()
         imgTrans = cv2.warpPerspective(img, M, dsize,borderMode=cv2.BORDER_CONSTANT, borderValue=borderColor)
-        if DEBUG:
-            plt.imshow(imgTrans,cmap='gray')
-            plt.title('birdview')
-            plt.show()
+        # plt.imshow(imgTrans,cmap='gray')
+        # plt.title('birdview')
+        # plt.show()
         return imgTrans
-    
+
     def transform_line_to_birdview(self,line,M):
         if len(line)<2:
             print('line is empty')
@@ -205,8 +164,31 @@ class CurvatureEstimator:
         line = line.reshape(-1,2).astype(np.int32)
         return line
 
+
+    def calculate_middle_line(self,image):
+        _, binary_image = cv2.threshold(image, 150, 1, cv2.THRESH_BINARY)
+        lanelines,middle_line = self.find_lane_lines_fast(binary_image)
+        if middle_line is None:
+            return None,None
+        height, width = image.shape[:2]
+        middle_line_smooth, poly_coeffs = self.fit_polynomial(middle_line,degree=2,max_height=height)
+        middle_line_smooth = np.array(middle_line_smooth,dtype=np.int32)
+        if DEBUG:
+            img = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
+            for line in lanelines:
+                if line is not None and len(line) > 0:
+                    cv2.polylines(img, [line], False, (255,0,0), 2)
+            if middle_line is not None and len(middle_line) > 0:
+                cv2.polylines(img, [middle_line], False, (0,0,255), 2)
+            if middle_line_smooth is not None and len(middle_line_smooth) > 0:
+                cv2.polylines(img, [middle_line_smooth], False, (0,255,0), 2)
+            plt.imshow(img)
+            plt.title('lines in birdview')
+            plt.show()
+        return middle_line_smooth, poly_coeffs
+    
     def find_lane_lines_fast(self, binary_image):
-        height, width = binary_image.shape[:2]
+        height, width = binary_image.shape
         if len(binary_image.shape) == 3:
             binary_image = cv2.cvtColor(binary_image, cv2.COLOR_BGR2GRAY)
         left = np.full((height, 2), -1)
@@ -218,6 +200,7 @@ class CurvatureEstimator:
         left_x,right_x = 0, width-1
         middle_x = width//2
         start_search_at = width//2
+        found_startline = False
         deviation_threshold =5
         distances =[]
         pixel_distance_between_lanes = 120
@@ -226,9 +209,21 @@ class CurvatureEstimator:
             if y < int(height*3/4):
                 print(' reached max height: ',y)
                 break
+            
             if binary_image[y, start_search_at] == 1:
-                print('found topend',y)
-                break
+                if last_left_x is not None and last_right_x is not None:
+                    print('found start line',y)
+                    found_startline = True
+                    left_active, right_active = True, True
+                    continue
+                if y > int(height*3/4+ height//8):
+                    print('found start line',y)
+                    found_startline = True
+                    left_active, right_active = True, True
+                    continue
+                else:
+                    print('found topend',y)
+                    break
             row = binary_image[y]
             left_line_indices = np.where( row[:start_search_at])[0]
             right_line_indices = np.where(row[start_search_at:])[0]
@@ -283,32 +278,41 @@ class CurvatureEstimator:
                 print('right deactivated',y)
                 print('right line has ending')
                 right_active = False
-                
+            
+            #stop when both lanes end
             if left_active == False and right_active == False:
                 break
-            
-            # print('len left_line_indices: ',len(left_line_indices),'len right_line_indices: ',len(right_line_indices),\
-            #     'start_search_at',start_search_at,'y: ',y)
-                
+            #if only one lane found, stop when it ends
+            if y < int(height*3/4+height*1/10):
+                if left_active == False and last_right_x is None:
+                    print('left deactivated and no right',y)
+                    break
+                if right_active == False and last_left_x is None:
+                    print('right deactivated and no left',y)
+                    break
+
+            #criteria for calculating middle line
             if len(left_line_indices) > 0 and len(right_line_indices) > 0 and left_active==True and right_active == True:
-                middle_x = left_x + (right_x - left_x)//2
-                #print('distance between lanes: ',right_x - left_x,'y: ',y)
+                #print('both lanes',y)
+                distance = right_x - left_x
+                if distance < 0.8*pixel_distance_between_lanes:
+                    print('distance abnormal: ',distance,'y: ',y)
+                    return [None,None],None
                 distances.append(right_x - left_x)
+                middle_x = left_x + (right_x - left_x)//2
                 #print('both lanes',y,'left_x, right_x: ',left_x,right_x,'middle_x: ',middle_x)
             elif len(left_line_indices) > 0 and (len(right_line_indices) ==0  or right_active== False) and left_active==True:
-                #middle_x = left_x + (width // 2)
                 middle_x = left_x + pixel_distance_between_lanes//2
                 #print('left lane',y)
             elif len(right_line_indices) > 0 and (len(left_line_indices) ==0 or left_active ==False) and right_active==True:
-                #middle_x = right_x - (width// 2)
                 middle_x = right_x - pixel_distance_between_lanes//2
                 #print('right lane',y)
-                #print('right lane',y,'right_x: ',right_x,'middle_x: ',middle_x)
             else:
                 #print('no lane',y)
                 pass
             
             if len(left_line_indices) > 0 or len(right_line_indices) > 0:
+                #print('middle_x: ',middle_x,'y: ',y)
                 middle[y] = [middle_x, y]
                 
             start_search_at = middle_x
@@ -318,11 +322,36 @@ class CurvatureEstimator:
                 start_search_at = width-1
             if middle_x <= 0 or middle_x >= width:
                 break
+            if found_startline == True:
+                left_active, right_active = True, True
+            
+        lanelines = [left[left[:, 0] != -1], right[right[:, 0] != -1]]
+        middle_line = middle[middle[:, 0] != -1]
+            
+        return lanelines, middle_line
         
-        return left[left[:, 0] != -1], right[right[:, 0] != -1],middle[middle[:, 0] != -1]
+        
+    def calculate_lateral_offset(self, middle_line,image):
+        if middle_line is None:
+            return np.nan
+        #get distamce between bottom point of middle line and center of image
+        height, width = image.shape[:2]
+        x,y = zip(*middle_line)
+        #get x of max y
+        print('len x: ',len(x))
+        print('max y: ',max(y))
+        print('height-1',height-1)
+        print('width//2',width//2)
+        bottom_x = x[np.argmax(y)]
+        print('bottom_x: ',bottom_x)
+        offset = bottom_x - (width//2)
+        print('offset: ',offset)
+        
+        return offset
     
-        
-    def calculate_heading_angle(self, middle_line,image,poly_coeffs):
+    def calculate_heading_angle(self, middle_line ,image,poly_coeffs):
+        if middle_line is None:
+            return np.nan
         image =image.copy()
         image = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
         height, width = image.shape[:2]
@@ -337,7 +366,9 @@ class CurvatureEstimator:
         x_tangent = slope * y_values + x_intercept
         tangent = list(zip(x_tangent.astype(int), y_values.astype(int)))
         angle =  math.atan(slope) * 180 / math.pi
-
+        #orientation to the right is negative, to the left is positive
+        angle = -angle
+        
         if DEBUG:
             cv2.polylines(image, [np.array(middle_line)], False, (0, 0, 255), 2)
             cv2.polylines(image, [np.array(tangent)], False, (255, 0, 0), 2)
@@ -348,14 +379,6 @@ class CurvatureEstimator:
             plt.show()
             
         return angle
-        
-    def calculate_lateral_offset(self, middle_line,image):
-        #get distamce between bottom point of middle line and center of image
-        x,y = zip(*middle_line)
-        #get x of max y
-        bottom_x = x[np.argmax(y)]
-        offset = bottom_x - image.shape[1]//2
-        return offset
     
     def fit_polynomial(self, points, degree=2, num_points=100,max_height=640):
         # Unpack the points into two lists
@@ -374,9 +397,234 @@ class CurvatureEstimator:
 
         return new_points, poly_coeffs
         
+    def centered_moving_average(self,points,windowSize=10):
+        half_window = windowSize // 2
+        smoothed_points = []
+        # Pad the points at the beginning and end with 'None'
+        padded_points = [None]*half_window + points + [None]*half_window
+        for i in range(half_window, len(padded_points) - half_window):
+            window_points = [p for p in padded_points[i-half_window : i+half_window+1] if p is not None]
+            if window_points:
+                avg_x = np.mean(window_points)
+                smoothed_points.append((avg_x))
         
+        return smoothed_points    
     
-    #get middle line between lanelines
+
+    #get endpoints of a curved line
+    def get_endpoints(self, line,image):
+        line = np.array(line,dtype=np.int32)
+        #from greyscale to rgb
+        image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+        rect = cv2.minAreaRect(line)
+        box_w,box_h = rect[1]
+        box = cv2.boxPoints(rect)
+        box = np.int0(box)
+        cv2.drawContours(image,[box],0,(0,0,255),2)
+        endpoints = []
+        dists = []
+        for point in box:
+            p = (int(point[0]),int(point[1]))
+            dist = cv2.pointPolygonTest(line, p, True)
+            dists.append(abs(dist))
+        #sort box by distance to line
+        box = box[np.argsort(dists)]
+        #dists = dists[np.argsort(dists)]
+        #print('dists: ',dists) 
+        endpoints = box[:2]
+        
+        if DEBUG:
+            #draw rectangle
+            cv2.polylines(image, [line], False, (0, 255, 0), 2)
+            #draw endpoints as crosses
+            cv2.drawMarker(image, tuple(endpoints[0]), (0, 0, 255), cv2.MARKER_CROSS, 20, 2)
+            cv2.drawMarker(image, tuple(endpoints[1]), (0, 0, 255), cv2.MARKER_CROSS, 20, 2)
+            plt.imshow(image)
+            plt.title('box')
+            plt.show()
+
+        return endpoints,box_w,box_h
+
+    def calculate_centerpoint(self, radius,s,e):
+        left_curve = False
+        if radius < 0:
+            left_curve = True
+        # x, y = symbols("x y")
+        # eq1 = Eq((x-e[0])**2 + (y-e[1])**2, radius**2)
+        # eq2 = Eq((x-s[0])**2 + (y-s[1])**2, radius**2)
+        # sol = solve((eq1, eq2), (x, y))
+        # print('sol: ',sol)
+        # cp=np.array(sol[1],dtype=np.int32)
+        # print('cp: ',cp)
+
+        def equations(p):
+            x, y = p
+            return [(x-e[0])**2 + (y-e[1])**2- radius**2, (x-s[0])**2 + (y-s[1])**2- radius**2 ]
+
+        x, y =  fsolve(equations, (1, 1))
+        cp = np.array([x,y],dtype=np.int32)
+        cp = self.correct_centerpoint(cp,s,e,left_curve)
+
+        return cp
+
+    def correct_centerpoint(self, cp,s,e,left_curve):
+        #fsolve only gives one solution. but there are two solutions for the centerpoint
+        #so we have to check which one is the correct one
+        m = (s[1]-e[1])/(s[0]-e[0]) if s[0] != e[0] else 1_000_000
+        #get y-intercept
+        b = s[1] - m*s[0]
+        #indicates if cp is left or right of line between endpoints
+        point_left =False
+        #check if cp is left or right of line between endpoints
+        if cp[1] < m*cp[0]+b:
+            point_left = True
+        if left_curve == point_left:
+            #correct cp
+            return cp
+        else:
+            #wrong cp
+            #move cp to other side of line between endpoints
+            #get middle point between endpoints
+            m_x = (s[0]+e[0])/2
+            m_y = (s[1]+e[1])/2
+            m =np.array([m_x,m_y],dtype=np.int32)
+            #get vector from middle point to cp
+            v = cp-m
+            #get vector from middle point to other side of line between endpoints
+            v2 = np.array([-v[0],-v[1]],dtype=np.int32)
+            #get new cp
+            cp = m+v2
+            return cp
+
+    def calculate_radius(self, middle_line, image):
+        if middle_line is None:
+            return np.nan
+        endpoints,bb_w,bb_h = self.get_endpoints(middle_line,image)
+        self._endpoints = endpoints
+        #width is alway the distance between points and bigger than height
+        (bb_w,bb_h) = (bb_w,bb_h) if bb_w > bb_h else (bb_h,bb_w )
+        # 2. Ansatz für die Berechnung der Krümmung nach https://www.mathopenref.com/arcradius.html
+        s,e = endpoints
+        #get distance between endpoints
+        #d = np.sqrt((s[0]-e[0])**2 + (s[1]-e[1])**2)
+        d = bb_w
+        #get width of curve (distance between middle point and line between endpoints)
+        #mp = point in middle of curve
+        mp = middle_line[len(middle_line)//2]
+        self._mp = mp
+        #get line between endpoints
+        #m = slope
+        m = (s[1]-e[1])/(s[0]-e[0]) if s[0] != e[0] else 1_000_000
+        #b = y-intercept
+        b = s[1] - m*s[0]
+        #calculate distance between middle point and line between endpoints
+        h = (m*mp[0] - mp[1] + b)/np.sqrt(m**2 + 1)
+        #h= bb_h
+        #calculate radius
+        radius = (h/2)+ d**2/(8*h)
+        print('radius: ',radius)
+        #calculate centerpoint
+        cp = self.calculate_centerpoint(radius,s,e)
+        self._cp = cp
+        #if radius is plus or minus infinite, set it to plus or minus 1_000_000
+        if radius == np.inf:
+            radius = 10_000
+        elif radius == -np.inf:
+            radius = 10_000
+        
+        if DEBUG:
+            self.show_estimated_circle(self._birdview_img, endpoints, middle_line, radius, cp, mp)
+        
+        #left curve if radius is negative, right curve if radius is positive
+        if cp[0] < mp[0]:
+            print('left curve')
+            radius = - abs(radius)
+        else:
+            print('right curve')
+            radius = abs(radius)
+       
+        return radius
+
+
+    def show_estimated_circle(self,birdview_img,endpoints,middle_line,radius,cp,mp):
+        if radius is np.nan:
+            return
+        #draw circle
+        image = birdview_img.copy()
+        if len(image.shape) == 2:
+            image = cv2.cvtColor(image,cv2.COLOR_GRAY2BGR)
+        cv2.polylines(image, [middle_line], False, (255,0,0), 1)
+        #draw endpoints
+        cv2.drawMarker(image, endpoints[0], (0, 0, 255), markerType=cv2.MARKER_CROSS, markerSize=10, thickness=2)
+        cv2.drawMarker(image, endpoints[1], (0, 0, 255), markerType=cv2.MARKER_CROSS, markerSize=10, thickness=2)
+        #draw center point
+        cv2.drawMarker(image, cp, (0, 255, 0), markerType=cv2.MARKER_CROSS, markerSize=10, thickness=2)
+        cv2.drawMarker(image, mp, (0, 255, 0), markerType=cv2.MARKER_CROSS, markerSize=10, thickness=2)
+        #draw circle around center point with radius = radius
+        #set cp to middle of image if out of bounds
+        # if cp[0] < 0 or cp[0] > image.shape[1] or cp[1] < 0 or cp[1] > image.shape[0]:
+        #     cp = np.array([image.shape[1]//2,image.shape[0]//2])
+        cv2.circle(image, cp, int(abs(radius)), (0, 255, 0), 1)
+        plt.imshow(image,cmap='gray')
+        plt.title('estimated radius')
+        plt.show()
+        
+#--------------------------------------------------------------------------------------------------------------------------
+#------------------------------------------middle line detection with YOLO-------------------------------------------------
+    def get_middleLine_YOLO(self,frame):
+        frame = cv2.resize(frame,(640,640))
+        laneline_segments = self.get_laneline_segments(frame)
+        filled_lanes_img = self.get_filled_lanes_img(frame, laneline_segments) 
+        M,dsize,borderlines = self.get_birdview_matrix(filled_lanes_img,CT=0.4)
+        birdview_img =  self.transform_img_to_birdview(filled_lanes_img,M,dsize)
+        self.birdview_img = birdview_img
+        lanelines = self.get_lanelines_centerline(birdview_img)
+        middle_line = self.get_middle_line(lanelines, birdview_img) 
+       
+        return middle_line
+    
+    def get_laneline_segments(self,img):
+        classes = self.model.names
+        #print('classes: ',classes)
+        segments = self.detectSegments(img)
+        lanes = self.get_normal_lanes(segments)
+        return lanes
+    
+    def detectSegments(self,frame):
+        results = self.model(frame, show=False, stream=True,conf=0.5, device=0)
+        # masks = results[0].masks  # Masks object
+
+        # classes     = results[0].boxes.cls.cpu().numpy()
+        # conf        = results[0].boxes.conf.cpu().numpy()
+        # boxes_xyxy  = results[0].boxes.xyxy.cpu().numpy()
+
+        # segments = []
+        
+        # if not masks == None:
+        #     for i, segment in enumerate(masks.segments):
+        #         segments.append([segment*[640,640],boxes_xyxy[i],classes[i], conf[i]])
+        # return segments
+        segments = []
+        for i,result in enumerate(results):
+            classes = result.boxes.cls.to('cpu').numpy()
+            conf = result.boxes.conf.to('cpu').numpy()
+            boxes_xyxy = result.boxes.xyxy.to('cpu').numpy()
+            masks = result.masks
+            if masks is not None:
+                for j, segment in enumerate(masks.xyn):
+                    segments.append([segment*[640,640],boxes_xyxy[j],classes[j], conf[j]])
+            break
+        return segments
+            
+    
+    def get_normal_lanes(self,segments):
+        segs =[]
+        for segment in segments:
+            if segment[2] == 2.0:
+                segs.append(segment[0][:])
+        return segs
+            
+     #get middle line between lanelines
     def get_middle_line(self,lanelines,img):
         image = np.zeros_like(img)
         left_line,right_line = lanelines
@@ -439,60 +687,6 @@ class CurvatureEstimator:
             plt.title('middle line')
             plt.show()
         return middle_line
-    
-    def get_middleLine_YOLO(self,frame):
-        frame = cv2.resize(frame,(640,640))
-        laneline_segments = self.get_laneline_segments(frame)
-        filled_lanes_img = self.get_filled_lanes_img(frame, laneline_segments) 
-        M,dsize,borderlines = self.get_birdview_matrix(filled_lanes_img,CT=0.4)
-        birdview_img =  self.transform_img_to_birdview(filled_lanes_img,M,dsize)
-        self.birdview_img = birdview_img
-        lanelines = self.get_lanelines_centerline(birdview_img)
-        middle_line = self.get_middle_line(lanelines, birdview_img) 
-       
-        return middle_line
-    
-    def get_laneline_segments(self,img):
-        classes = self.model.names
-        #print('classes: ',classes)
-        segments = self.detectSegments(img)
-        lanes = self.get_normal_lanes(segments)
-        return lanes
-    
-    def detectSegments(self,frame):
-        results = self.model(frame, show=False, stream=True,conf=0.5, device=0)
-        # masks = results[0].masks  # Masks object
-
-        # classes     = results[0].boxes.cls.cpu().numpy()
-        # conf        = results[0].boxes.conf.cpu().numpy()
-        # boxes_xyxy  = results[0].boxes.xyxy.cpu().numpy()
-
-        # segments = []
-        
-        # if not masks == None:
-        #     for i, segment in enumerate(masks.segments):
-        #         segments.append([segment*[640,640],boxes_xyxy[i],classes[i], conf[i]])
-        # return segments
-        segments = []
-        for i,result in enumerate(results):
-            classes = result.boxes.cls.to('cpu').numpy()
-            conf = result.boxes.conf.to('cpu').numpy()
-            boxes_xyxy = result.boxes.xyxy.to('cpu').numpy()
-            masks = result.masks
-            if masks is not None:
-                for j, segment in enumerate(masks.xyn):
-                    segments.append([segment*[640,640],boxes_xyxy[j],classes[j], conf[j]])
-            break
-        return segments
-            
-    
-    def get_normal_lanes(self,segments):
-        segs =[]
-        for segment in segments:
-            if segment[2] == 2.0:
-                segs.append(segment[0][:])
-        return segs
-            
     
     def get_line_endpoints(self,line):
         line =np.array(line,dtype=np.int32).squeeze()
@@ -581,35 +775,7 @@ class CurvatureEstimator:
         return lanelines
 
 
-    #get endpoints of a curved line
-    def get_endpoints(self,line):
-        #from greyscale to rgb
-        #image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
-        x,y,w,h = cv2.boundingRect(line)
-        x_s1, x_s2 = x, x+w
-        y_s1, y_s2 = y, y+h
-        points_s =[[x_s1,y_s1],[x_s2,y_s1]]
-        points_e = [[x_s1,y_s2],[x_s2,y_s2]]
-        #check if one of the points lies on the line
-        dist_s = []
-        for i, point in enumerate(points_s):
-            p = (point[0],point[1])
-            dist = cv2.pointPolygonTest(line, p, True)
-            #print('dist: ',dist)
-            dist_s.append(dist)
-        p_s = points_s[np.argmin(np.abs(dist_s))]
-        dist_e = []
-        for i, point in enumerate(points_e):
-            p = (point[0],point[1])
-            dist = cv2.pointPolygonTest(line, p, True)
-            #print('dist: ',dist)
-            dist_e.append(dist)
-        p_e = points_e[np.argmin(np.abs(dist_e))]
-        #change p_s and p_e if p_e[1] is smaller than p_s[1]
-        if p_e[1] < p_s[1]:
-            p_s, p_e = p_e, p_s
-
-        return p_s, p_e
+    
 
     #calculate stepsizes to reduce a list perfectly to a desired length
     def find_stepsizes(self,length, desired_length):
@@ -676,154 +842,86 @@ class CurvatureEstimator:
         pixels = np.array([pixels[1],pixels[0]]).T
         return pixels
 
-        
-    def correct_centerpoint(self,cp,s,e,left_curve):
-        #fsolve only gives one solution. but there are two solutions for the centerpoint
-        #so we have to check which one is the correct one
-        m = (s[1]-e[1])/(s[0]-e[0]) if s[0] != e[0] else 1_000_000
-        #get y-intercept
-        b = s[1] - m*s[0]
-        #indicates if cp is left or right of line between endpoints
-        point_left =False
-        #check if cp is left or right of line between endpoints
-        if cp[1] < m*cp[0]+b:
-            point_left = True
-        if left_curve == point_left:
-            #correct cp
-            return cp
-        else:
-            #wrong cp
-            #move cp to other side of line between endpoints
-            #get middle point between endpoints
-            m_x = (s[0]+e[0])/2
-            m_y = (s[1]+e[1])/2
-            m =np.array([m_x,m_y],dtype=np.int32)
-            #get vector from middle point to cp
-            v = cp-m
-            #get vector from middle point to other side of line between endpoints
-            v2 = np.array([-v[0],-v[1]],dtype=np.int32)
-            #get new cp
-            cp = m+v2
-            return cp
-
-    def calculate_centerpoint(self,radius,s,e):
-        left_curve = False
-        if radius < 0:
-            left_curve = True
-        # x, y = symbols("x y")
-        # eq1 = Eq((x-e[0])**2 + (y-e[1])**2, radius**2)
-        # eq2 = Eq((x-s[0])**2 + (y-s[1])**2, radius**2)
-        # sol = solve((eq1, eq2), (x, y))
-        # print('sol: ',sol)
-        # cp=np.array(sol[1],dtype=np.int32)
-        # print('cp: ',cp)
-
-        def equations(p):
-            x, y = p
-            return [(x-e[0])**2 + (y-e[1])**2- radius**2, (x-s[0])**2 + (y-s[1])**2- radius**2 ]
-
-        x, y =  fsolve(equations, (1, 1))
-        cp = np.array([x,y],dtype=np.int32)
-        cp = self.correct_centerpoint(cp,s,e,left_curve)
-    
-        return cp
-        
-
-    def calculate_curvature(self,middle_line, endpoints):
-        # 2. Ansatz für die Berechnung der Krümmung nach https://www.mathopenref.com/arcradius.html
-        s,e = endpoints
-        #get distance between endpoints
-        d = np.sqrt((s[0]-e[0])**2 + (s[1]-e[1])**2)
-        #get width of curve (distance between middle point and line between endpoints)
-        #mp = point in middle of curve
-        mp = middle_line[len(middle_line)//2].squeeze()if len(middle_line) > 0 else middle_line.squeeze()
-        #get line between endpoints
-        #m = slope
-        m = (s[1]-e[1])/(s[0]-e[0]) if s[0] != e[0] else 1_000_000
-        #b = y-intercept
-        b = s[1] - m*s[0]
-        #calculate distance between middle point and line between endpoints
-        h = (m*mp[0] - mp[1] + b)/np.sqrt(m**2 + 1)
-        #calculate radius
-        radius = (h/2)+ d**2/(8*h)
-        #if radius is plus or minus infinite, set it to plus or minus 1_000_000
-        if radius == np.inf:
-            radius = 1_000_000
-        elif radius == -np.inf:
-            radius = -1_000_000
-        #calculate centerpoint
-        cp = self.calculate_centerpoint(radius,s,e)
-        #draw_estimated_circle(final_img,abs(radius),cp,s,e,mp)
-        return radius,cp
-
-
-    def show_estimated_circle(self,birdview_img,endpoints,middle_line,radius,cp):
-        #draw circle
-        image = birdview_img.copy()
-        if len(image.shape) == 2:
-            image = cv2.cvtColor(image,cv2.COLOR_GRAY2BGR)
-        cv2.polylines(image, [middle_line], False, (255,0,0), 1)
-        #draw endpoints
-        cv2.drawMarker(image, endpoints[0], (0, 0, 255), markerType=cv2.MARKER_CROSS, markerSize=10, thickness=2)
-        cv2.drawMarker(image, endpoints[1], (0, 0, 255), markerType=cv2.MARKER_CROSS, markerSize=10, thickness=2)
-        #draw center point
-        cv2.drawMarker(image, cp, (0, 255, 0), markerType=cv2.MARKER_CROSS, markerSize=10, thickness=2)
-        #draw circle around center point with radius = radius
-        print('radius: ',int(abs(radius)))
-        print('cp: ',cp)
-        #set cp to middle of image if out of bounds
-        # if cp[0] < 0 or cp[0] > image.shape[1] or cp[1] < 0 or cp[1] > image.shape[0]:
-        #     cp = np.array([image.shape[1]//2,image.shape[0]//2])
-        cv2.circle(image, cp, int(abs(radius)), (0, 255, 0), 1)
-        plt.imshow(image,cmap='gray')
-        plt.title('estimated radius')
-        plt.show()
-
-#main function
-# def get_lane_radius_and_anchorpoints(frame,nr_anchorpoints=50):
-#     global DEBUG
-#     DEBUG=False
-#     middle_line,left,right = get_middleLine_Otsu(frame,nr_points)
-#     endpoints = get_endpoints(middle_line)
-#     radius,cp = calculate_curvature(middle_line,endpoints)
-
-#     if DEBUG:
-#         M,dsize,borderlines =  get_birdview_matrix(frame,CT=0.4)
-#         frame =  transform_img_to_birdview(frame,M,dsize,borderColor=[255,255,255])
-#         show_estimated_circle(frame,endpoints,middle_line,radius,cp)
-#     return radius,cp,left,right
-
 
 
 if __name__ == '__main__':
-    
+    import pandas as pd
     estimator = CurvatureEstimator(mode='otsu')
     dir = '../Aufnahmen/data/debug'
     #list files in directory
     files = os.listdir(dir)
     files = natsort.natsorted(files)
+    print('len files: ',len(files))
+    
     curvatures = []
+    radii = []
+    lateral_offsets = []
+    heading_angles = []
     for i,file in enumerate(files):
         print('file: ',file)
         print('i: ',i)
         img = cv2.imread(os.path.join(dir,file),0)
         estimator.process_frame(img,debug=False)
         curvature = estimator.get_curvature(debug=False)
-        print('curvature: ',curvature)
         curvatures.append(curvature)
-        if i > 200:
-            break
+        radius = estimator.get_radius()
+        radii.append(radius)
+        lateral_offset = estimator.get_lateral_offset()
+        lateral_offsets.append(lateral_offset)
+        heading_angle = estimator.get_heading_angle()
+        heading_angles.append(heading_angle)
+        #input('press enter to continue')
+        # if i > 400:
+        #     break
     # img = cv2.imread(os.path.join(dir,files[61]))
     # print('file: ',files[46])
     #estimator.process_frame(img,debug=True)
-    
-    print('curvatures: ',curvatures)
+
+    smooth_curvatures = gaussian_filter(curvatures, 1)
     plt.plot(curvatures)
+    plt.title('curvature')
+    plt.show()
+    plt.plot(smooth_curvatures,)
+    plt.title('smooth curvature')
     plt.show()
 
-    # radius,cp = get_lane_radius_and_anchorpoints(img)
-    # print('radius:',radius)
-    # print('cp:',cp)
-
+    plt.plot(lateral_offsets)
+    plt.title('lateral offset')
+    plt.show()
+    
+    smooth_offsets = gaussian_filter(lateral_offsets, 1)
+    plt.plot(smooth_offsets)
+    plt.title('smoothed lateral offset')
+    plt.show()
+    
+    print('min max radius: ',min(radii),max(radii))
+    radii_smooth = gaussian_filter(radii, 1)
+    plt.plot(radii,color='blue')
+    plt.plot(radii_smooth,color='red')
+    plt.title('radius')
+    plt.show()
+    
+    plt.plot(heading_angles)
+    plt.title('heading angle')
+    plt.show()
+    
+    smooth_heading_angles = gaussian_filter(heading_angles, 1)
+    plt.plot(smooth_heading_angles)
+    plt.title('smooth heading angle')
+    plt.show()
+    
+    #make dataframe from curvatures
+    df = pd.DataFrame(smooth_offsets,columns=['lateral_offset'])
+    df['curvature'] = smooth_curvatures
+    df['heading_angle'] = smooth_heading_angles
+    dates =pd.read_csv('../Aufnahmen/data/debug_timestamps.csv')
+    df['datetime'] = dates['datetime']
+    df['datetime'] = pd.to_datetime(df['datetime'])
+    #to index
+    df.set_index('datetime',inplace=True)
+    print(df.head())
+    #save dataframe to csv
+    df.to_csv('../Aufnahmen/data/frame_measurements.csv',index=True)
+    print('saved dataframe to csv')
     # #%%
     # %timeit get_lane_radius(img)
