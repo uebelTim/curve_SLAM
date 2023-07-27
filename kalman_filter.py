@@ -11,7 +11,7 @@ def kalman_filter(zs, Q, R, v_xs, l_r, l_f, delta_fs):
     kf.x = np.array([[-0.06],[-0.8],[0.69],[3]])
 
     # Define the initial uncertainty
-    kf.P *= 1000.
+    kf.P= np.eye(4) * 1000
 
     # Define the process noise covariance
     kf.Q = Q
@@ -57,6 +57,9 @@ def load_data():
     df_ackermann = pd.read_csv('../Aufnahmen/data/ackermann.csv')
     df_ackermann['datetime'] = pd.to_datetime(df_ackermann['datetime'])
     df_ackermann.drop(['speed'], axis=1, inplace=True)
+    df_control = pd.merge_asof(df_speed, df_ackermann, on='datetime', direction='nearest')
+    df_control.to_csv('../Aufnahmen/data/control.csv', index=False)
+    print('saved to ../Aufnahmen/data/control.csv')
     df = pd.merge_asof(df, df_ackermann, on='datetime', direction='nearest')
     #calculate derivtive of k
     df['time_seconds'] = (df['datetime'] - df['datetime'].iloc[0]).dt.total_seconds()
@@ -70,6 +73,7 @@ def load_data():
     df = df[['datetime','lateral_offset','heading_angle','curvature','curvature_derivative','speed','steering_angle']]
     df.fillna(0, inplace=True)
     df.to_csv('../Aufnahmen/data/kalmanVars.csv', index=False)
+    print('saved to ../Aufnahmen/data/kalmanVars.csv')
     print(df[:30])
     return df
 
@@ -90,10 +94,10 @@ print(zs[:10])
 
 
 # Define your process noise covariance here
-Q = np.eye(4) * 0.001
+Q = np.eye(4) *0.001
 
 # Define your measurement noise covariance here
-R = np.eye(4) * 0.1
+R = np.eye(4) *0.01
 
 # Define your vehicle parameters here
 v_x = speed  # longitudinal speed

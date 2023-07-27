@@ -1,5 +1,5 @@
 
-
+#%%
 import cv2
 print('cv2 version:', cv2.__version__,'\n')
 import ultralytics as u
@@ -8,9 +8,9 @@ from ultralytics import YOLO
 import numpy as np
 import os
 import matplotlib
-matplotlib.use('Qt5Agg')
+#matplotlib.use('Qt5Agg')
 import matplotlib.pyplot as plt
-%matplotlib inline
+#%matplotlib inline
 from scipy.optimize import fsolve
 import time
 import matplotlib.patches as mpatches
@@ -37,6 +37,7 @@ class CurvatureEstimator:
         self.radius = 0
         self.lateral_offset = None
         self.heading_angle = None
+        self.starting_line = False
 
     
     #main function; call once per frame; then get required values with getters
@@ -63,7 +64,6 @@ class CurvatureEstimator:
         self.lateral_offset = lateral_offset
         heading_angle = self.calculate_heading_angle(middle_line, birdview_frame, poly_coeffs)
         self.heading_angle = heading_angle
-        print('heading angle: ',heading_angle)
         
         
  
@@ -79,11 +79,7 @@ class CurvatureEstimator:
     
     def get_radius(self):
         radius = self.radius
-        #set max radius to +- 10_000
-        radius = radius if abs(radius) < 10_000 else 10_000 if radius > 0 else -10_000
-        #set min radius to +- 80 which is smallest possible radius for track (is 0.5m)
-        radius = radius if abs(radius) > 80 else 80 if radius > 0 else -80
-        print('corrected radius: ',radius)
+        
         #convert radius from pixels to meter
         #track width is 120 Pixel wich is 0.75m
         radius = radius /120 *0.75
@@ -98,6 +94,8 @@ class CurvatureEstimator:
     def get_heading_angle(self):
         return self.heading_angle
     
+    def get_starting_line(self):
+        return self.starting_line
 
     
     def otsuThresholding(self,img, thresh=0, maxval=255):
@@ -201,6 +199,7 @@ class CurvatureEstimator:
         middle_x = width//2
         start_search_at = width//2
         found_startline = False
+        self.starting_line = False
         deviation_threshold =5
         distances =[]
         pixel_distance_between_lanes = 120
@@ -215,6 +214,7 @@ class CurvatureEstimator:
                     print('found start line',y)
                     found_startline = True
                     left_active, right_active = True, True
+                    self.starting_line = True
                     continue
                 if y > int(height*3/4+ height//8):
                     print('found start line',y)
@@ -338,12 +338,7 @@ class CurvatureEstimator:
         height, width = image.shape[:2]
         x,y = zip(*middle_line)
         #get x of max y
-        print('len x: ',len(x))
-        print('max y: ',max(y))
-        print('height-1',height-1)
-        print('width//2',width//2)
         bottom_x = x[np.argmax(y)]
-        print('bottom_x: ',bottom_x)
         offset = bottom_x - (width//2)
         print('offset: ',offset)
         
@@ -367,7 +362,7 @@ class CurvatureEstimator:
         tangent = list(zip(x_tangent.astype(int), y_values.astype(int)))
         angle =  math.atan(slope) * 180 / math.pi
         #orientation to the right is negative, to the left is positive
-        angle = -angle
+        angle = angle
         
         if DEBUG:
             cv2.polylines(image, [np.array(middle_line)], False, (0, 0, 255), 2)
@@ -427,12 +422,19 @@ class CurvatureEstimator:
             p = (int(point[0]),int(point[1]))
             dist = cv2.pointPolygonTest(line, p, True)
             dists.append(abs(dist))
-        #sort box by distance to line
-        box = box[np.argsort(dists)]
-        #dists = dists[np.argsort(dists)]
-        #print('dists: ',dists) 
-        endpoints = box[:2]
-        
+        # print('dists: ',dists)
+        # print('box: ',box)
+        dists = np.array(dists)[np.argsort(box[:,1])]
+        box = box[np.argsort(box[:,1])]
+        # print('dists: ',dists)
+        # print('box: ',box)
+        box_bottom = box[:2]
+        box_top = box[2:]
+        #get cornerpoint with smallest distance to line of botom corners
+        endpoints.append(box_bottom[np.argmin(dists[:2])])
+        #get cornerpoint with smallest distance to line of top corners
+        endpoints.append(box_top[np.argmin(dists[2:])])
+        print('endpoints: ',endpoints)
         if DEBUG:
             #draw rectangle
             cv2.polylines(image, [line], False, (0, 255, 0), 2)
@@ -519,18 +521,31 @@ class CurvatureEstimator:
         b = s[1] - m*s[0]
         #calculate distance between middle point and line between endpoints
         h = (m*mp[0] - mp[1] + b)/np.sqrt(m**2 + 1)
+        print('h: ',h)
+        print('d: ',d)
+        print('bb_w: ',bb_w)
+        print('bb_h: ',bb_h)
         #h= bb_h
         #calculate radius
         radius = (h/2)+ d**2/(8*h)
-        print('radius: ',radius)
-        #calculate centerpoint
-        cp = self.calculate_centerpoint(radius,s,e)
-        self._cp = cp
-        #if radius is plus or minus infinite, set it to plus or minus 1_000_000
         if radius == np.inf:
             radius = 10_000
         elif radius == -np.inf:
             radius = 10_000
+        #if h is very small, set radius to 10_000
+        if abs(bb_h) < 2.5:
+            radius = 10_000 if h > 0 else -10_000
+        print('radius: ',radius)
+        #set max radius to +- 10_000
+        radius = radius if abs(radius) < 10_000 else 10_000 if radius > 0 else -10_000
+        #set min radius to +- 80 which is smallest possible radius for track (is 0.5m)
+        radius = radius if abs(radius) > 80 else 80 if radius > 0 else -80
+        print('corrected radius: ',radius)
+        #calculate centerpoint
+        cp = self.calculate_centerpoint(radius,s,e)
+        self._cp = cp
+        #if radius is plus or minus infinite, set it to plus or minus 1_000_000
+        
         
         if DEBUG:
             self.show_estimated_circle(self._birdview_img, endpoints, middle_line, radius, cp, mp)
@@ -542,6 +557,7 @@ class CurvatureEstimator:
         else:
             print('right curve')
             radius = abs(radius)
+        
        
         return radius
 
@@ -844,84 +860,115 @@ class CurvatureEstimator:
 
 
 
-if __name__ == '__main__':
-    import pandas as pd
-    estimator = CurvatureEstimator(mode='otsu')
-    dir = '../Aufnahmen/data/debug'
-    #list files in directory
-    files = os.listdir(dir)
-    files = natsort.natsorted(files)
-    print('len files: ',len(files))
+# if __name__ == '__main__':
+#     import pandas as pd
+#     estimator = CurvatureEstimator(mode='otsu')
+#     dir = '../Aufnahmen/data/debug'
+#     #list files in directory
+#     files = os.listdir(dir)
+#     files = natsort.natsorted(files)
+#     print('len files: ',len(files))
     
-    curvatures = []
-    radii = []
-    lateral_offsets = []
-    heading_angles = []
-    for i,file in enumerate(files):
-        print('file: ',file)
-        print('i: ',i)
-        img = cv2.imread(os.path.join(dir,file),0)
-        estimator.process_frame(img,debug=False)
-        curvature = estimator.get_curvature(debug=False)
-        curvatures.append(curvature)
-        radius = estimator.get_radius()
-        radii.append(radius)
-        lateral_offset = estimator.get_lateral_offset()
-        lateral_offsets.append(lateral_offset)
-        heading_angle = estimator.get_heading_angle()
-        heading_angles.append(heading_angle)
-        #input('press enter to continue')
-        # if i > 400:
-        #     break
-    # img = cv2.imread(os.path.join(dir,files[61]))
-    # print('file: ',files[46])
-    #estimator.process_frame(img,debug=True)
+#     curvatures = []
+#     radii = []
+#     lateral_offsets = []
+#     heading_angles = []
+#     start_line = []
+#     found_start = False
+#     for i,file in enumerate(files):
+#         print('i: ',i)
+#         img = cv2.imread(os.path.join(dir,file),0)
+#         estimator.process_frame(img,debug=False)
+        
+#         starting_line = estimator.get_starting_line()
+#         start_line.append(starting_line)
+#         curvature = estimator.get_curvature(debug=False)
+#         curvatures.append(curvature)
+#         radius = estimator.get_radius()
+#         radii.append(radius)
+#         lateral_offset = estimator.get_lateral_offset()
+#         lateral_offsets.append(lateral_offset)
+#         heading_angle = estimator.get_heading_angle()
+#         heading_angles.append(heading_angle)
+        
+#         #input('press enter to continue')
+#         if i > 500:
+#             break
 
-    smooth_curvatures = gaussian_filter(curvatures, 1)
-    plt.plot(curvatures)
-    plt.title('curvature')
-    plt.show()
-    plt.plot(smooth_curvatures,)
-    plt.title('smooth curvature')
-    plt.show()
 
-    plt.plot(lateral_offsets)
-    plt.title('lateral offset')
-    plt.show()
-    
-    smooth_offsets = gaussian_filter(lateral_offsets, 1)
-    plt.plot(smooth_offsets)
-    plt.title('smoothed lateral offset')
-    plt.show()
-    
-    print('min max radius: ',min(radii),max(radii))
-    radii_smooth = gaussian_filter(radii, 1)
-    plt.plot(radii,color='blue')
-    plt.plot(radii_smooth,color='red')
-    plt.title('radius')
-    plt.show()
-    
-    plt.plot(heading_angles)
-    plt.title('heading angle')
-    plt.show()
-    
-    smooth_heading_angles = gaussian_filter(heading_angles, 1)
-    plt.plot(smooth_heading_angles)
-    plt.title('smooth heading angle')
-    plt.show()
-    
-    #make dataframe from curvatures
-    df = pd.DataFrame(smooth_offsets,columns=['lateral_offset'])
-    df['curvature'] = smooth_curvatures
-    df['heading_angle'] = smooth_heading_angles
-    dates =pd.read_csv('../Aufnahmen/data/debug_timestamps.csv')
-    df['datetime'] = dates['datetime']
-    df['datetime'] = pd.to_datetime(df['datetime'])
-    #to index
-    df.set_index('datetime',inplace=True)
-    print(df.head())
-    #save dataframe to csv
-    df.to_csv('../Aufnahmen/data/frame_measurements.csv',index=True)
-    print('saved dataframe to csv')
-    # #%%
-    # %timeit get_lane_radius(img)
+
+# # df_curvatures = pd.DataFrame(curvatures,columns=['curvature'])
+# # df_curvatures.to_csv('../Aufnahmen/data/curvatures.csv',index=False)
+# # print('saved curvatures to csv')
+# #%%
+# #print indexes where curvature is nan
+# nans = np.argwhere(np.isnan(curvatures))
+# print('nans: ',nans)
+
+# plt.plot(curvatures)
+# plt.title('curvature')
+# current_cmap = matplotlib.cm.get_cmap()
+# current_cmap.set_bad(color='red')
+# plt.show()
+# smooth_curvatures = gaussian_filter(curvatures, 1)
+# plt.plot(smooth_curvatures)
+# #make line another color when starting line is detected
+# # for i in range(len(start_line)):
+# #     if start_line[i] == True:
+# #         plt.axvline(x=i,color='black')
+# plt.title('smooth curvature')
+# plt.show()
+
+# df_curvatures = pd.Series(smooth_curvatures)
+# m_a_curvatures = df_curvatures.rolling(5).mean().to_numpy()
+# plt.plot(m_a_curvatures)
+# plt.title('moving average curvature')
+# plt.show()
+
+# #%%
+# plt.plot(lateral_offsets)
+# plt.title('lateral offset')
+# plt.show()
+
+# smooth_offsets = gaussian_filter(lateral_offsets, 1)
+# plt.plot(smooth_offsets)
+# plt.title('smoothed lateral offset')
+# plt.show()
+
+# print('min max radius: ',min(radii),max(radii))
+
+# plt.plot(radii,color='blue')
+# plt.title('radius')
+# plt.show()
+
+# radii_smooth = gaussian_filter(radii, 1)
+# plt.plot(radii_smooth,color='red')
+# plt.title('smooth radius')
+# plt.show()
+
+# plt.plot(heading_angles)
+# plt.title('heading angle')
+# plt.show()
+
+# smooth_heading_angles = gaussian_filter(heading_angles, 1)
+# plt.plot(smooth_heading_angles)
+# plt.title('smooth heading angle')
+# plt.show()
+
+# #make dataframe from curvatures
+# df = pd.DataFrame(lateral_offsets,columns=['lateral_offset'])
+# df['curvature'] = curvatures
+# df['heading_angle'] = heading_angles
+# dates =pd.read_csv('../Aufnahmen/data/debug_timestamps.csv')
+# df['datetime'] = dates['datetime']
+# df['datetime'] = pd.to_datetime(df['datetime'])
+# #to index
+# df.set_index('datetime',inplace=True)
+# print(df.head())
+# #save dataframe to csv
+# df.to_csv('../Aufnahmen/data/frame_measurements.csv',index=True)
+# print('saved dataframe to csv')
+# #%%
+# %timeit get_lane_radius(img)
+
+
