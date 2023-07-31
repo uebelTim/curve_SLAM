@@ -1,0 +1,73 @@
+i am trying to implement a visual slam algorithm for a racetrack in python. the last step is to construct the map via a sgd method. can you help me implement that part? the following part is a chapter from a paper that explains it. 
+
+An SGD optimization is selected to construct the final map
+because of its light computation burden to find the solution.
+Fig. 6. Three constraints for Stochastic Gradient Descent.
+To construct the final map, we build a sequence of esti- 
+mated vehicle’s incremental poses between two successive poses 
+Δzk=[Δxk, Δyk, Δθk].
+The estimation algorithm is formulated as a constrained 
+stochastic optimization problem. In SGD SLAM algorithms, a 
+Gaussian stochastic model is defined to link the estimated pose 
+zk with a noisy pose observation ok at time k. However, we 
+cannot observe or measure incremental poses, as we do not have 
+a GPS nor any landmark. Therefore, we derive observation mod- 
+els with the curvature information as a function of incremental 
+poses. The derived observation model f(Δzk), consists of three 
+equations as,
+as,
+f1(Δzk)=sqrt(Δx_k^2 +Δy_k^2  (7a)
+f2(Δzk)=2 · Δy_k/(Δx_k^2 +Δy_k^2)  (7b)
+f3(Δzk)=Δθ_k  (7c)
+where f1(Δzk) and f2(Δzk) represent the distance between
+poses and the curvature, respectively; Δxk and Δyk denote 
+the incremental poses of x and y axis, respectively; Δθk is 
+the incremental pose of heading angle. The three equations are 
+illustrated in Fig. 6.
+We need the curvature, distance, and heading angle incre- 
+ment values to satisfy all three sub equations in (7) to define 
+the vehicle pose relationship between two continuous frames. 
+The curvature is computed using the lane image information, 
+and the distance between poses is computed from the ICP 
+compensated vehicle pose set from the previous section. Finally, 
+Δθ is computed with the yaw rate information from internal 
+vehicle sensors assuming their noise is negligible. In addition to 
+imposing the vehicle pose constraints between two continuous 
+frames, we also impose a constraint between consecutive laps 
+based on the curvature matching criteria from Section IV-C. [users comment: i will provide that info when we need it]
+The maximum likelihood poses can be computed by mini- 
+mizing a log probability
+−logP(zk​∣o)∝∑_{i<k}​[(f(Δz_k​)−o_i​)^TΣ_i^−1​(f(Δz_k​)−o_i​)] (10)
+We reformulate Equation (10) by linearizing f(Δz_k) ≈ F_k + 
+J_kd_k.
+−logP(zk​∣o)∝∑_{i<k}​[d_k^T​J_k^T​Σ_i^−1​J_k​d_k​−2d_k^T​J_k^T​Σ_i^−1​r_i​+r_i^T​Σ_i^−1​r_i​]  (11)
+where dk =Δzk is a search direction of the optimization prob-
+lem at time k and the residual ri is set as ri = oi − Fk.
+The objective is to improve the accuracy of the map by finding 
+a search direction dk which minimizes the cost function in (11) 
+and maximizes the logarithmic probability. To find a search 
+direction dk, we differentiate Equation (11) with respect to dk 
+and set it to zero to get the following equation,
+(J_k^T​Σ_i^−1​J_k​)d_k​=J_k^T​Σ_i^−1​r_i​ (12)
+From Equation (7), we derive the Jacobian equation as
+follows:
+Jk=\frac{\Delta x_k}{\sqrt{\Delta x_k^2 + \Delta y_k^2}} & \frac{\Delta y_k}{\sqrt{\Delta x_k^2 + \Delta y_k^2}} & 0  \\
+-\frac{4\Delta x_k\Delta y_k}{(\Delta x_k^2 + \Delta y_k^2)^2} & \frac{2(\Delta x_k^2 - \Delta y_k^2)}{(\Delta x_k^2 + \Delta y_k^2)^2} & 0  \\
+0 & 0 & 1
+(13)
+In order to obtain dk for the SGD optimization problem, we 
+first consider the cost (11) evaluated at the current state with 
+dk = 0. Define ci as follows:
+c_ii​=r_i^T​Σ_i^−1​r_i​
+Using the chain rule, the gradient of the cost with respect to
+dk can be obtained.
+∇c_i​=∂c_i​/∂d_k​=(∂c_i​/∂r_i)*(∂r_i​/∂d_k)​=2⋅r_i^T​Σ_i^−1​J_k​  (15a)
+d_k = α∇c_i = 2 · r_i^T Σ^{-1}_i J_k ​  (15b)
+where, α denotes a predefined learning rate, which is a tuning
+parameter.
+The right-hand side of Equation (12) is derived by summing 
+all the gradient constraints, ∇c_i. J_k^T Σ_i^−1 J_k, the left-hand side 
+of Equation (12) is invertible. Therefore We define the matrix Mk≈J_k^T Σ_i^^−1J_k which can be used as a scale factor. We can 
+rewrite d_k using the matrix M_k and (15) as follows:
+d_k​≈2⋅α⋅M_k^−1​⋅r_i^T​Σ_i^T​J_k​  (16)
+

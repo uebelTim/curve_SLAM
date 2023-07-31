@@ -8,6 +8,9 @@ from curvature_estimation import CurvatureEstimator
 import os
 import natsort 
 import cv2
+from scipy.signal import savgol_filter
+from scipy.ndimage import gaussian_filter
+import seaborn as sns
 
 # Function to perform the Kalman filter
 def kalman_filter(params):
@@ -43,7 +46,34 @@ def kalman_filter(params):
         
     return np.array(xs), np.array(Ps)
 
+def remove_outliers(data):
+    plt.figure()
+    plt.plot(data)
+    plt.title('data')
+    plt.show()
+    # Remove outliers
+    df = pd.DataFrame(data,columns=['data'])
+    df.boxplot(column=['data'])
+    plt.show()
+    q75, q25 = np.percentile(df['data'], [80 ,20])
+    min = q25 - (1.5*(q75-q25))
+    max = q75 + (1.5*(q75-q25))
+    #make outliers nan
+    #get indices of outliers
+    idx = df.loc[(df['data'] < min) | (df['data'] > max)].index
+    #replace outliers with mean of non-outlier neighbors
+    for i in idx:
+        #get index of previous non-outlier
+        idx_prev = df.loc[:i].loc[(df['data'] >= min) & (df['data'] <= max)].index[-1]
+        idx_next = df.loc[i:].loc[(df['data'] >= min) & (df['data'] <= max)].index[0]
+        #replace outlier with mean of previous and next non-outlier
+        df.loc[i,'data'] = (df.loc[idx_prev,'data']+df.loc[idx_next,'data'])/2
 
+    plt.plot(df['data'])
+    plt.title('cleaned data')
+    plt.show()
+    return df['data'].values
+    
 
 
 
@@ -66,12 +96,14 @@ for i,file in enumerate(files):
         k.append(curvature)
         phi.append(heading_angle)
         y.append(offset)
-        if i > 500:
+        if i > 1000:
             break
+#y,phi,k = np.array(y),np.array(phi),np.array(k)
+print('max min y: ',max(y),min(y))
+
+      
 #%%
-y = np.array(y)
-phi = np.array(phi)
-k= np.array(k)
+#handle nans
 y_nans = np.where(np.isnan(y))[0]
 phi_nans = np.where(np.isnan(phi))[0]
 k_nans = np.where(np.isnan(k))[0]
@@ -79,12 +111,20 @@ print('y_nans: ',y_nans)
 print('phi_nans: ',phi_nans)
 print('k_nans: ',k_nans)
 for i in y_nans:
-    y[i] = np.mean(y[i-3:i])
+    next_not_nan = np.where(~np.isnan(y[i:]))[0][0]
+    y[i] = (y[i-1]+next_not_nan)/2
+    print(f'y{i} replaced with {y[i]}')
 for i in phi_nans:
-    phi[i] = np.mean(phi[i-3:i])
+    next_not_nan = np.where(~np.isnan(phi[i:]))[0][0]
+    phi[i] = (phi[i-1]+next_not_nan)/2
 for i in k_nans:
-    k[i] = np.mean(k[i-3:i])
-        
+    next_not_nan = np.where(~np.isnan(k[i:]))[0][0]
+    k[i] = (k[i-1]+next_not_nan)/2
+
+#%%
+#handle outliers
+y = remove_outliers(y)
+
 #%%
 # Define constants
 lr = lf = 0.18
@@ -95,10 +135,11 @@ H = np.array([
     [0, 0, 1, 0]
 ])
 # Process noise covariance; represents the uncertainty in the model itself
-#Increasing the values in Q will make the Kalman filter place less trust in the model's predictions and more trust in the actual measurements
-Q = np.eye(4)*0.1
-Q[0,0]=0.15
-Q[1,1]=0.0005
+#Increasing the values in Q will make the Kalman filter place  more trust in the actual measurements and less trust in the model's predictions and
+Q = np.eye(4)
+Q[0,0]=0.5
+Q[1,1]=0.0002
+Q[2,2]=0.2
 # Measurement noise covariance; represents the uncertainty in the measurements
 R = np.eye(3)*0.01
 # Initial state
@@ -109,15 +150,23 @@ P0 = np.eye(4)
 # Observations
 Z = np.array([y, phi, k]).T
 
-# Control inputs
-df_control = pd.read_csv('../Aufnahmen/data/control.csv')
-U = df_control[['steering_angle', 'speed']].values
+
 
 #load timestamps of images
 df_timestamps = pd.read_csv('../Aufnahmen/data/debug_timestamps.csv')
+df_timestamps['datetime'] = pd.to_datetime(df_timestamps['datetime'])
 # # Calculate time step
-dt = (pd.to_datetime(df_timestamps['datetime']).diff().mean()).total_seconds()
+#dt = (pd.to_datetime(df_timestamps['datetime']).diff().mean()).total_seconds()
+dt = 1/30
 print('mean dt:', dt)
+
+
+# Control inputs
+df_control = pd.read_csv('../Aufnahmen/data/control.csv')
+df_control['datetime'] = pd.to_datetime(df_control['datetime'])
+df_timestamps = pd.merge_asof(df_timestamps, df_control, on='datetime', direction='nearest')
+print(df_timestamps.head())
+U = df_timestamps[['steering_angle', 'speed']].values
 
 # Initialize A and B with the first speed value
 A = np.array([
@@ -164,4 +213,10 @@ plt.show()
 df = pd.DataFrame({'corrected_y': xs[:,0], 'corrected_phi': xs[:,1], 'corrected_k': xs[:,2],'measured_y': y, 'measured_phi': phi, 'measured_k': k})
 df.to_csv('../Aufnahmen/data/kalmanVars.csv', index=False)
 print('saved to ../Aufnahmen/data/kalmanVars.csv')
+# %%
+df =pd.DataFrame({ 'corrected_k': xs[:,2]})
+df['speed'] = df_timestamps['speed']
+df['datetime'] = df_timestamps['datetime']
+df.to_csv('../Aufnahmen/data/correctedCurvature.csv', index=False)
+print('saved to ../Aufnahmen/data/correctedCurvature.csv')
 # %%

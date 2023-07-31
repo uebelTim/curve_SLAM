@@ -38,6 +38,7 @@ class CurvatureEstimator:
         self.lateral_offset = None
         self.heading_angle = None
         self.starting_line = False
+        self._endpoints = None
 
     
     #main function; call once per frame; then get required values with getters
@@ -64,6 +65,9 @@ class CurvatureEstimator:
         self.lateral_offset = lateral_offset
         heading_angle = self.calculate_heading_angle(middle_line, birdview_frame, poly_coeffs)
         self.heading_angle = heading_angle
+        print('radius: ',radius)
+        print('lateral_offset: ',lateral_offset)
+        print('heading_angle: ',heading_angle)
         
         
  
@@ -189,6 +193,8 @@ class CurvatureEstimator:
         height, width = binary_image.shape
         if len(binary_image.shape) == 3:
             binary_image = cv2.cvtColor(binary_image, cv2.COLOR_BGR2GRAY)
+        #blur
+        binary_image = cv2.GaussianBlur(binary_image,(3,3),0)
         left = np.full((height, 2), -1)
         right = np.full((height, 2), -1)
         middle =np.full((height, 2), -1)
@@ -200,7 +206,7 @@ class CurvatureEstimator:
         start_search_at = width//2
         found_startline = False
         self.starting_line = False
-        deviation_threshold =5
+        deviation_threshold =4
         distances =[]
         pixel_distance_between_lanes = 120
         for y in range(height-1, -1, -1):
@@ -235,14 +241,24 @@ class CurvatureEstimator:
                     avg_diff_left =0
                 else:
                     diff_left = left_x - last_left_x#current x - previous x
-                    avg_diff_left =np.mean(left_diffs)
+                    #calculate slope of left line	
+                    #diff_left = -(left_x - last_left_x)/(y - (y+1))
+                    weights = np.arange(1,len(left_diffs)+1)**2
+                    avg_diff_left =np.ma.average(left_diffs,weights=weights)
+                    mean_diff_left = np.mean(left_diffs)
+                    #print('diff_left: ',diff_left,'avg_diff_left: ',avg_diff_left,'mean_diff',mean_diff_left,'y: ',y)
                 if abs(diff_left - avg_diff_left) <= deviation_threshold:
                     left[y] = [left_x, y]
                     last_left_x = left_x
+                    last_left_y = y
                     left_diffs = np.append(left_diffs,diff_left)
-                    if left_diffs.size > 50:
+                    if left_diffs.size > 10:
                         left_diffs = np.delete(left_diffs,0)
                     # print('diff_left: ',diff_left,'avg_diff_left: ',avg_diff_left)
+                elif y > int(height*7/8):
+                    print('deviation left in lower half of image, continue search',y)
+                    last_left_x = left_x
+                    continue
                 else:
                     print('left deactivated',y)
                     print('left deviated; diff_left: ',diff_left,'avg_diff_left: ',avg_diff_left)
@@ -250,10 +266,11 @@ class CurvatureEstimator:
                     # print('left_x: ',left_x,'start_search_at: ',start_search_at)
                     left_active = False
             #deactivate if found lane before and no lane found now
-            elif len(left_line_indices) == 0 and last_left_x is not None and left_active:
-                print('left deactivated',y)
+            elif len(left_line_indices) == 0 and last_left_x is not None and left_active and y < int(height*7/8):
                 print('left line has ending')
+                print('left deactivated',y)
                 left_active = False
+                
                 
             if len(right_line_indices) > 0 and right_active:
                 right_x = right_line_indices[0] + start_search_at
@@ -262,14 +279,23 @@ class CurvatureEstimator:
                     avg_diff_right =0
                 else:
                     diff_right = right_x - last_right_x
-                    avg_diff_right = np.mean(right_diffs)
+                    #diff_right = (right_x - last_right_x)/(y - (y+1))
+                    weights = np.arange(1,len(right_diffs)+1)**2
+                    avg_diff_right = np.ma.average(right_diffs,weights=weights)
                 if abs(diff_right - avg_diff_right) <= deviation_threshold:
                     right[y] = [right_x, y]
                     last_right_x = right_x
                     right_diffs = np.append(right_diffs,diff_right)
-                    if right_diffs.size > 50:
+                    if right_diffs.size > 10:
                         right_diffs = np.delete(right_diffs,0)
                     #print('diff_right: ',diff_right,'avg_diff_right: ',avg_diff_right,'y: ',y)
+                elif y > int(height*7/8):
+                    print('deviation right in lower half of image, continue search',y)
+                    last_right_x = right_x
+                    continue
+                    # right_diffs = np.append(right_diffs,diff_right)
+                    # if right_diffs.size > 10:
+                    #     right_diffs = np.delete(right_diffs,0)
                 else:
                     print('right deactivated',y)
                     print('right deviated; diff_right: ',diff_right,'avg_diff_right: ',avg_diff_right)
@@ -283,7 +309,7 @@ class CurvatureEstimator:
             if left_active == False and right_active == False:
                 break
             #if only one lane found, stop when it ends
-            if y < int(height*3/4+height*1/10):
+            if y < int(height*7/8):
                 if left_active == False and last_right_x is None:
                     print('left deactivated and no right',y)
                     break
@@ -302,10 +328,16 @@ class CurvatureEstimator:
                 middle_x = left_x + (right_x - left_x)//2
                 #print('both lanes',y,'left_x, right_x: ',left_x,right_x,'middle_x: ',middle_x)
             elif len(left_line_indices) > 0 and (len(right_line_indices) ==0  or right_active== False) and left_active==True:
-                middle_x = left_x + pixel_distance_between_lanes//2
+                if len(distances) > 0:
+                    middle_x = left_x + distances[-1]//2
+                else:
+                    middle_x = left_x + pixel_distance_between_lanes//2
                 #print('left lane',y)
             elif len(right_line_indices) > 0 and (len(left_line_indices) ==0 or left_active ==False) and right_active==True:
-                middle_x = right_x - pixel_distance_between_lanes//2
+                if len(distances) > 0:
+                    middle_x = right_x - distances[-1]//2
+                else:
+                    middle_x = right_x - pixel_distance_between_lanes//2
                 #print('right lane',y)
             else:
                 #print('no lane',y)
@@ -327,7 +359,8 @@ class CurvatureEstimator:
             
         lanelines = [left[left[:, 0] != -1], right[right[:, 0] != -1]]
         middle_line = middle[middle[:, 0] != -1]
-            
+        middle_line = self.filter_outliers(middle_line,1.0)
+        
         return lanelines, middle_line
         
         
@@ -340,8 +373,6 @@ class CurvatureEstimator:
         #get x of max y
         bottom_x = x[np.argmax(y)]
         offset = bottom_x - (width//2)
-        print('offset: ',offset)
-        
         return offset
     
     def calculate_heading_angle(self, middle_line ,image,poly_coeffs):
@@ -434,7 +465,7 @@ class CurvatureEstimator:
         endpoints.append(box_bottom[np.argmin(dists[:2])])
         #get cornerpoint with smallest distance to line of top corners
         endpoints.append(box_top[np.argmin(dists[2:])])
-        print('endpoints: ',endpoints)
+        #print('endpoints: ',endpoints)
         if DEBUG:
             #draw rectangle
             cv2.polylines(image, [line], False, (0, 255, 0), 2)
@@ -521,10 +552,10 @@ class CurvatureEstimator:
         b = s[1] - m*s[0]
         #calculate distance between middle point and line between endpoints
         h = (m*mp[0] - mp[1] + b)/np.sqrt(m**2 + 1)
-        print('h: ',h)
-        print('d: ',d)
-        print('bb_w: ',bb_w)
-        print('bb_h: ',bb_h)
+        # print('h: ',h)
+        # print('d: ',d)
+        # print('bb_w: ',bb_w)
+        # print('bb_h: ',bb_h)
         #h= bb_h
         #calculate radius
         radius = (h/2)+ d**2/(8*h)
@@ -533,14 +564,13 @@ class CurvatureEstimator:
         elif radius == -np.inf:
             radius = 10_000
         #if h is very small, set radius to 10_000
-        if abs(bb_h) < 2.5:
+        if abs(bb_h) < 3.5 and abs(bb_w) > 110:
             radius = 10_000 if h > 0 else -10_000
         print('radius: ',radius)
         #set max radius to +- 10_000
         radius = radius if abs(radius) < 10_000 else 10_000 if radius > 0 else -10_000
         #set min radius to +- 80 which is smallest possible radius for track (is 0.5m)
         radius = radius if abs(radius) > 80 else 80 if radius > 0 else -80
-        print('corrected radius: ',radius)
         #calculate centerpoint
         cp = self.calculate_centerpoint(radius,s,e)
         self._cp = cp
@@ -713,12 +743,12 @@ class CurvatureEstimator:
         e = line[-1]
         return s,e
 
-    def filter_outliers(self,points):
+    def filter_outliers(self,points,deviation_threshold=2):
         x,y = points.T
         dist = np.sqrt((x[1:] - x[:-1])**2 + (y[1:] - y[:-1])**2)
         mean = np.mean(dist)
         #remove points that are more than 3*mean
-        idx = np.where(dist < 2*mean)
+        idx = np.where(dist < deviation_threshold*mean)
         return points[idx]
 
 
@@ -877,12 +907,14 @@ class CurvatureEstimator:
 #     found_start = False
 #     for i,file in enumerate(files):
 #         print('i: ',i)
+#         # if i < 120:
+#         #     continue
 #         img = cv2.imread(os.path.join(dir,file),0)
 #         estimator.process_frame(img,debug=False)
         
 #         starting_line = estimator.get_starting_line()
 #         start_line.append(starting_line)
-#         curvature = estimator.get_curvature(debug=False)
+#         curvature = estimator.get_curvature(debug=True)
 #         curvatures.append(curvature)
 #         radius = estimator.get_radius()
 #         radii.append(radius)
@@ -892,59 +924,64 @@ class CurvatureEstimator:
 #         heading_angles.append(heading_angle)
         
 #         #input('press enter to continue')
-#         if i > 500:
+#         if i > 400:
 #             break
+        
+#     nans_curvatures = np.where(np.isnan(curvatures))[0]
+#     print('nans_curvatures: ',nans_curvatures)
+#     nans_offsets = np.where(np.isnan(lateral_offsets))[0]
+#     nans_angles = np.where(np.isnan(heading_angles))[0]
+#     for i in nans_curvatures:
+#         next_not_nan = np.where(~np.isnan(curvatures[i:]))[0][0]
+#         curvatures[i] = (curvatures[i-1]+next_not_nan)/2
+#     for i in nans_offsets:
+#         next_not_nan = np.where(~np.isnan(lateral_offsets[i:]))[0][0]
+#         lateral_offsets[i] = (lateral_offsets[i-1]+next_not_nan)/2
+#     for i in nans_angles:
+#         next_not_nan = np.where(~np.isnan(heading_angles[i:]))[0][0]
+#         heading_angles[i] = (heading_angles[i-1]+next_not_nan)/2
 
 
+# # # # df_curvatures = pd.DataFrame(curvatures,columns=['curvature'])
+# # # # df_curvatures.to_csv('../Aufnahmen/data/curvatures.csv',index=False)
+# # # # print('saved curvatures to csv')
+# # #%%
 
-# # df_curvatures = pd.DataFrame(curvatures,columns=['curvature'])
-# # df_curvatures.to_csv('../Aufnahmen/data/curvatures.csv',index=False)
-# # print('saved curvatures to csv')
-# #%%
-# #print indexes where curvature is nan
-# nans = np.argwhere(np.isnan(curvatures))
-# print('nans: ',nans)
+# # plt.plot(curvatures)
+# # plt.title('curvature')
+# # current_cmap = matplotlib.cm.get_cmap()
+# # current_cmap.set_bad(color='red')
+# # plt.show()
+# # smooth_curvatures = gaussian_filter(curvatures, 1)
+# # plt.plot(smooth_curvatures)
+# # plt.title('smooth curvature')
+# # plt.show()
 
-# plt.plot(curvatures)
-# plt.title('curvature')
-# current_cmap = matplotlib.cm.get_cmap()
-# current_cmap.set_bad(color='red')
-# plt.show()
-# smooth_curvatures = gaussian_filter(curvatures, 1)
-# plt.plot(smooth_curvatures)
-# #make line another color when starting line is detected
-# # for i in range(len(start_line)):
-# #     if start_line[i] == True:
-# #         plt.axvline(x=i,color='black')
-# plt.title('smooth curvature')
-# plt.show()
+# # df_curvatures = pd.Series(curvatures)
+# # m_a_curvatures = df_curvatures.rolling(5).mean().to_numpy()
+# # plt.plot(m_a_curvatures)
+# # plt.title('moving average curvature')
+# # plt.show()
 
-# df_curvatures = pd.Series(smooth_curvatures)
-# m_a_curvatures = df_curvatures.rolling(5).mean().to_numpy()
-# plt.plot(m_a_curvatures)
-# plt.title('moving average curvature')
-# plt.show()
+# # plt.plot(radii,color='blue')
+# # plt.title('radius')
+# # plt.show()
+
+# # radii_smooth = gaussian_filter(radii, 1)
+# # plt.plot(radii_smooth,color='red')
+# # plt.title('smooth radius')
+# # plt.show()
 
 # #%%
 # plt.plot(lateral_offsets)
 # plt.title('lateral offset')
 # plt.show()
-
-# smooth_offsets = gaussian_filter(lateral_offsets, 1)
+# smooth_offsets = gaussian_filter(lateral_offsets, 2)
 # plt.plot(smooth_offsets)
 # plt.title('smoothed lateral offset')
 # plt.show()
 
-# print('min max radius: ',min(radii),max(radii))
 
-# plt.plot(radii,color='blue')
-# plt.title('radius')
-# plt.show()
-
-# radii_smooth = gaussian_filter(radii, 1)
-# plt.plot(radii_smooth,color='red')
-# plt.title('smooth radius')
-# plt.show()
 
 # plt.plot(heading_angles)
 # plt.title('heading angle')
@@ -972,3 +1009,5 @@ class CurvatureEstimator:
 # %timeit get_lane_radius(img)
 
 
+
+# %%
