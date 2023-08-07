@@ -1,64 +1,101 @@
 import numpy as np
 from scipy.optimize import minimize
 
-# Define the observation model functions
-def f(delta_z):
+def get_increment_poses(df):
+    assert 'x' in df.columns
+    assert 'y' in df.columns
+    assert 'theta' in df.columns
+    df['delta_x'] = df['x'].diff()
+    df['delta_y'] = df['y'].diff()
+    df['delta_theta'] = df['theta'].diff()
+    
+#constraint1: distance between poses 
+def f1(delta_x,delta_y):
+    return np.sqrt(delta_x**2 + delta_y**2 )
+#constraint2: curvature
+def f2(delta_x,delta_y):
+    return 2 * delta_y / (delta_x**2 + delta_y**2)
+#constraint3: heading angle
+def f3(delta_theta):
+    return delta_theta
+
+def compute_jacobian(delta_x, delta_y):
+    # Calculate the terms used in the Jacobian matrix
+    term1 = delta_x / np.sqrt(delta_x**2 + delta_y**2)
+    term2 = delta_y / np.sqrt(delta_x**2 + delta_y**2)
+    term3 = -4 * delta_x * delta_y / (delta_x**2 + delta_y**2)**2
+    term4 = 2 * (delta_x**2 - delta_y**2) / (delta_x**2 + delta_y**2)**2
+
+    # Construct the Jacobian matrix
+    jacobian = np.array([[term1, term2, 0],
+                         [term3, term4, 0],
+                         [0,     0,     1]])
+    
+    return jacobian
+
+def observation_model(delta_z):
+    # Extract the incremental poses
     delta_x, delta_y, delta_theta = delta_z
-    return np.array([
-        np.sqrt(delta_x**2 + delta_y**2),
-        2 * delta_y / (delta_x**2 + delta_y**2),
-        delta_theta
-    ])
 
-# Define the Jacobian
-def jacobian(delta_z):
+    # Calculate the values of the observation model
+    f1 = np.sqrt(delta_x**2 + delta_y**2)  # Equation 7a
+    f2 = 2 * delta_y / (delta_x**2 + delta_y**2)  # Equation 7b
+    f3 = delta_theta  # Equation 7c
+
+    return np.array([f1, f2, f3])
+
+def cost_function(delta_z, obs, sigma):
+    # Calculate the observation model and its residuals
+    obs_model = observation_model(delta_z)
+    residuals = obs - obs_model
+
+    # Compute the cost as the weighted sum of squared residuals
+    cost = np.sum(residuals**2 / sigma)
+
+    return cost
+
+def cost_gradient(delta_z, obs, sigma):
+    # Extract the incremental poses
     delta_x, delta_y, delta_theta = delta_z
-    return np.array([
-        [delta_x / np.sqrt(delta_x**2 + delta_y**2), delta_y / np.sqrt(delta_x**2 + delta_y**2), 0],
-        [-4 * delta_x * delta_y / (delta_x**2 + delta_y**2)**2, 2 * (delta_x**2 - delta_y**2) / (delta_x**2 + delta_y**2)**2, 0],
-        [0, 0, 1]
-    ])
 
-# Define the cost function
-def cost_function(delta_z, o, sigma, J):
-    f_delta_z = f(delta_z)
-    r = o - f_delta_z
-    return np.dot(np.dot(r.T, np.linalg.inv(sigma)), np.dot(J, r))
+    # Calculate the Jacobian matrix
+    jacobian = compute_jacobian(delta_x, delta_y)
 
-# Define the SGD optimization function
-def sgd_optimization(delta_z_initial, o, sigma, alpha):
-    # Initialize delta_z
-    delta_z = delta_z_initial
+    # Calculate the observation model and its residuals
+    obs_model = observation_model(delta_z)
+    residuals = obs - obs_model
 
-    # Iterate until convergence
-    for i in range(1000):  # You might need to adjust the number of iterations
-        # Compute the Jacobian
-        J = jacobian(delta_z)
+    # Compute the gradient of the cost
+    gradient = -2 * jacobian.T @ (residuals / sigma)
 
-        # Compute the cost function
-        cost = cost_function(delta_z, o, sigma, J)
+    return gradient
 
-        # Compute the gradient of the cost function
-        gradient = 2 * np.dot(np.dot((o - f(delta_z)), np.linalg.inv(sigma)), J)
+def stochastic_gradient_descent(data, sigma, learning_rate=0.01, max_iter=1000, tol=1e-6):
+    # Initialize the pose estimates
+    delta_z = np.zeros(3)
 
-        # Update delta_z
-        delta_z = delta_z - alpha * gradient
+    # Initialize the cost
+    cost = np.inf
+
+    # Iterate until convergence or maximum number of iterations
+    for i in range(max_iter):
+        # Randomly select a data point
+        index = np.random.randint(len(data))
+        delta_z_sample = data[['delta_x', 'delta_y', 'delta_theta']].iloc[index].values
+        obs_sample = data[['f1', 'f2', 'f3']].iloc[index].values
+
+        # Calculate the cost and gradient for the selected data point
+        cost_new = cost_function(delta_z_sample, obs_sample, sigma)
+        gradient = cost_gradient(delta_z_sample, obs_sample, sigma)
+
+        # Update the pose estimates
+        delta_z -= learning_rate * gradient
+
+        # Check for convergence
+        if np.abs(cost_new - cost) < tol:
+            break
+
+        # Update the cost
+        cost = cost_new
 
     return delta_z
-
-# Define the equality constraint function for loop closure
-def equality_constraint(delta_z, segment_start, segment_end):
-    return np.linalg.norm(delta_z[segment_start] - delta_z[segment_end])
-
-# Define the optimization problem
-def optimization_problem(delta_z_initial, o, sigma, alpha, segment_starts, segment_ends):
-    # Initialize delta_z
-    delta_z = delta_z_initial
-
-    # Define the constraints
-    constraints = [{'type': 'eq', 'fun': equality_constraint, 'args': (delta_z, start, end)} for start, end in zip(segment_starts, segment_ends)]
-
-    # Solve the optimization problem
-    result = minimize(sgd_optimization, delta_z, args=(o, sigma, alpha), constraints=constraints)
-
-    return result.x

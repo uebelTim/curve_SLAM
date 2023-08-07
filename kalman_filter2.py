@@ -137,8 +137,8 @@ H = np.array([
 # Process noise covariance; represents the uncertainty in the model itself
 #Increasing the values in Q will make the Kalman filter place  more trust in the actual measurements and less trust in the model's predictions and
 Q = np.eye(4)
-Q[0,0]=0.5
-Q[1,1]=0.0002
+Q[0,0]=0.05
+Q[1,1]=0.0001
 Q[2,2]=0.2
 # Measurement noise covariance; represents the uncertainty in the measurements
 R = np.eye(3)*0.01
@@ -211,10 +211,11 @@ plt.title('Heading angle')
 plt.show()
 # %%
 df = pd.DataFrame({'corrected_y': xs[:,0], 'corrected_phi': xs[:,1], 'corrected_k': xs[:,2],'measured_y': y, 'measured_phi': phi, 'measured_k': k})
+df['datetime'] = df_timestamps['datetime']
 df.to_csv('../Aufnahmen/data/kalmanVars.csv', index=False)
 print('saved to ../Aufnahmen/data/kalmanVars.csv')
 # %%
-df =pd.DataFrame({ 'corrected_k': xs[:,2]})
+df =pd.DataFrame({ 'curvature': xs[:,2]})
 df['speed'] = df_timestamps['speed']
 df['datetime'] = df_timestamps['datetime']
 df.to_csv('../Aufnahmen/data/correctedCurvature.csv', index=False)

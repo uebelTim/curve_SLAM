@@ -372,7 +372,8 @@ class CurvatureEstimator:
         x,y = zip(*middle_line)
         #get x of max y
         bottom_x = x[np.argmax(y)]
-        offset = bottom_x - (width//2)
+        #left of center is positive
+        offset = -(bottom_x - (width//2))
         return offset
     
     def calculate_heading_angle(self, middle_line ,image,poly_coeffs):
@@ -890,57 +891,66 @@ class CurvatureEstimator:
 
 
 
-# if __name__ == '__main__':
-#     import pandas as pd
-#     estimator = CurvatureEstimator(mode='otsu')
-#     dir = '../Aufnahmen/data/debug'
-#     #list files in directory
-#     files = os.listdir(dir)
-#     files = natsort.natsorted(files)
-#     print('len files: ',len(files))
+if __name__ == '__main__':
+    import pandas as pd
+    estimator = CurvatureEstimator(mode='otsu')
+    dir = '../Aufnahmen/data/debug'
+    #list files in directory
+    files = os.listdir(dir)
+    files = natsort.natsorted(files)
+    print('len files: ',len(files))
     
-#     curvatures = []
-#     radii = []
-#     lateral_offsets = []
-#     heading_angles = []
-#     start_line = []
-#     found_start = False
-#     for i,file in enumerate(files):
-#         print('i: ',i)
-#         # if i < 120:
-#         #     continue
-#         img = cv2.imread(os.path.join(dir,file),0)
-#         estimator.process_frame(img,debug=False)
+    curvatures = []
+    radii = []
+    lateral_offsets = []
+    heading_angles = []
+    start_line = []
+    found_start = False
+    for i,file in enumerate(files):
+        print('i: ',i)
+        # if i < 120:
+        #     continue
+        img = cv2.imread(os.path.join(dir,file),0)
+        estimator.process_frame(img,debug=False)
         
-#         starting_line = estimator.get_starting_line()
-#         start_line.append(starting_line)
-#         curvature = estimator.get_curvature(debug=True)
-#         curvatures.append(curvature)
-#         radius = estimator.get_radius()
-#         radii.append(radius)
-#         lateral_offset = estimator.get_lateral_offset()
-#         lateral_offsets.append(lateral_offset)
-#         heading_angle = estimator.get_heading_angle()
-#         heading_angles.append(heading_angle)
+        starting_line = estimator.get_starting_line()
+        start_line.append(starting_line)
+        curvature = estimator.get_curvature(debug=False)
+        curvatures.append(curvature)
+        radius = estimator.get_radius()
+        radii.append(radius)
+        lateral_offset = estimator.get_lateral_offset()
+        lateral_offsets.append(lateral_offset)
+        heading_angle = estimator.get_heading_angle()
+        heading_angles.append(heading_angle)
         
-#         #input('press enter to continue')
-#         if i > 400:
-#             break
+        #input('press enter to continue')
+        # if i > 400:
+        #     break
         
-#     nans_curvatures = np.where(np.isnan(curvatures))[0]
-#     print('nans_curvatures: ',nans_curvatures)
-#     nans_offsets = np.where(np.isnan(lateral_offsets))[0]
-#     nans_angles = np.where(np.isnan(heading_angles))[0]
-#     for i in nans_curvatures:
-#         next_not_nan = np.where(~np.isnan(curvatures[i:]))[0][0]
-#         curvatures[i] = (curvatures[i-1]+next_not_nan)/2
-#     for i in nans_offsets:
-#         next_not_nan = np.where(~np.isnan(lateral_offsets[i:]))[0][0]
-#         lateral_offsets[i] = (lateral_offsets[i-1]+next_not_nan)/2
-#     for i in nans_angles:
-#         next_not_nan = np.where(~np.isnan(heading_angles[i:]))[0][0]
-#         heading_angles[i] = (heading_angles[i-1]+next_not_nan)/2
-
+    nans_curvatures = np.where(np.isnan(curvatures))[0]
+    print('nans_curvatures: ',nans_curvatures)
+    nans_offsets = np.where(np.isnan(lateral_offsets))[0]
+    nans_angles = np.where(np.isnan(heading_angles))[0]
+    for i in nans_curvatures:
+        next_not_nan = np.where(~np.isnan(curvatures[i:]))[0][0]
+        curvatures[i] = (curvatures[i-1]+next_not_nan)/2
+    for i in nans_offsets:
+        next_not_nan = np.where(~np.isnan(lateral_offsets[i:]))[0][0]
+        lateral_offsets[i] = (lateral_offsets[i-1]+next_not_nan)/2
+    for i in nans_angles:
+        next_not_nan = np.where(~np.isnan(heading_angles[i:]))[0][0]
+        heading_angles[i] = (heading_angles[i-1]+next_not_nan)/2
+    nans_curvatures = np.where(np.isnan(curvatures))[0]
+    print('nans_curvatures: ',nans_curvatures)
+    
+    df = pd.DataFrame({'curvature':curvatures,'lateral_offset':lateral_offsets,'heading_angle':heading_angles})
+    dates =pd.read_csv('../Aufnahmen/data/debug_timestamps.csv')
+    df['datetime'] = dates['datetime']
+    df = df[['datetime','curvature','lateral_offset','heading_angle']]
+    df=df[:len(dates)]
+    df.to_csv('../Aufnahmen/data/frame_measurements.csv',index=False)
+    print('saved dataframe to csv')
 
 # # # # df_curvatures = pd.DataFrame(curvatures,columns=['curvature'])
 # # # # df_curvatures.to_csv('../Aufnahmen/data/curvatures.csv',index=False)
@@ -1003,8 +1013,7 @@ class CurvatureEstimator:
 # df.set_index('datetime',inplace=True)
 # print(df.head())
 # #save dataframe to csv
-# df.to_csv('../Aufnahmen/data/frame_measurements.csv',index=True)
-# print('saved dataframe to csv')
+
 # #%%
 # %timeit get_lane_radius(img)
 

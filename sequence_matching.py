@@ -16,9 +16,32 @@ class SequenceMatcher:
         assert 'curvature' in df.columns
         assert 'speed' in df.columns
         assert 'datetime' in df.columns
-        self.df_distance,self.df_time = self.resample_to_distance(df)
+        self.df_distance, self.df_time = self.resample_to_distance(df)
         self.loop_dist_points,self.loop_distance = self.get_loop_length()
-        self.matches = self.match_sequences()
+        dist_matches = self.match_sequences()
+        time_matches =  []
+        for segments in dist_matches:
+            segment_matches = []
+            for match in segments:
+                print('match: ',match)
+                dist_start = self.df_distance.loc[match[0],'cumulative_distance']
+                dist_end = self.df_distance.loc[match[1],'cumulative_distance']
+                #find index of time df where cumulative distance is closest to cum_dist
+                time_idx_start = (np.abs(self.df_time['cumulative_distance'] - dist_start)).idxmin()
+                time_idx_end = (np.abs(self.df_time['cumulative_distance'] - dist_end)).idxmin()
+                segment_matches.append((time_idx_start, time_idx_end))
+            time_matches.append(segment_matches)
+        self.matches = time_matches
+        print('matches: ',self.matches)
+        
+        plt.figure(figsize=(10, 5))
+        plt.plot(np.arange(len(self.df_time)),self.df_time['curvature'])
+        for match in self.matches[1]:
+            print('match: ',match)
+            plt.axvline(match[0], color='k', linestyle='--')
+            plt.axvline(match[1], color='k', linestyle='--')
+        plt.title('curvature per time')
+        plt.show()
         
     def get_matches(self):
         return self.matches
@@ -28,9 +51,10 @@ class SequenceMatcher:
         plt.plot( df['curvature'])
         plt.title('original curvature per time')
         df['datetime'] = pd.to_datetime(df['datetime'])
-        df = df.set_index('datetime')
+        #df = df.set_index('datetime')
+        df.rename(columns={'curvature': 'curvature'}, inplace=True)
         # Calculate time difference in seconds
-        df['delta_time'] = df.index.to_series().diff().dt.total_seconds()
+        df['delta_time'] = df['datetime'].diff().dt.total_seconds()
         df['delta_time'] = df['delta_time'].fillna(0)
         # Calculate distance in each time step (assuming speed is in m/s)
         df['distance'] = df['speed'] * df['delta_time']
@@ -38,20 +62,32 @@ class SequenceMatcher:
         new_distance_points = np.arange(df['cumulative_distance'].min(), df['cumulative_distance'].max(), interv)
 
         # Define an interpolation function based on the original data
-        interp_func = interp1d(df['cumulative_distance'], df['curvature'])
+        interp_func_curvature = interp1d(df['cumulative_distance'], df['curvature'])
+        df = df.set_index('datetime')
+        interp_func_time = interp1d(df['cumulative_distance'], df.index.astype(int))
+        df.reset_index(inplace=True)
         # Use the interpolation function to get the curvature values at the new distance points
-        resampled_curvature = interp_func(new_distance_points)
+        resampled_curvature = interp_func_curvature(new_distance_points)
+        resampled_time = pd.to_datetime(interp_func_time(new_distance_points))
+        #add index of original df to resampled df
+        print('len original df: ',len(df),' len resampled df: ',len(resampled_curvature))
+        ratio = len(df)/len(resampled_curvature)
+        print('ratio: ',ratio)
         # Create a new DataFrame for the resampled data
         df_resampled = pd.DataFrame({
+            
             'cumulative_distance': new_distance_points,
             'curvature': resampled_curvature
         })
+        print(df_resampled[:30])
         plt.figure(figsize=(10, 5))
         plt.plot(df_resampled['cumulative_distance'], df_resampled['curvature'])
         plt.title('curvature per distance')
         plt.xlabel('distance (m)')
         plt.show()
         
+        # df=pd.merge_asof(df, df_resampled, on='cumulative_distance', direction='nearest',tolerance=0.05)
+        # print(df[:30])
         return df_resampled,df
     
     def get_loop_length(self):
@@ -99,7 +135,7 @@ class SequenceMatcher:
         print('segments: ',segments)
         
         search_width = int(loop_dist_points * 0.1)
-        tolerance_k = 0.1
+        tolerance_k = 0.2
         matches = []
         for segment in segments:
             plt.figure(figsize=(10, 6))
@@ -138,8 +174,35 @@ class SequenceMatcher:
 
 df = pd.read_csv('../Aufnahmen/data/correctedCurvature.csv')
 df = df.rename(columns={'corrected_k':'curvature'})
+print(df.head())
+print('len df: ',len(df))
 matcher =SequenceMatcher(df)
 matches = matcher.get_matches()
 print('matches: ',matches)
+df['datetime'] = pd.to_datetime(df['datetime'])
+match_times = []
+matches_dict = {'sequence':[],'matches':{'start':[],'end':[]}}
 
+for i,sequence in enumerate(matches):
+    segment_times = []
+    for j,match in enumerate(sequence):
+        segment_times.append((df.loc[match[0],'datetime'],df.loc[match[1],'datetime']))
+    match_times.append(segment_times)
+print('match times: ',match_times)       
 
+ 
+matches_dict =  {"sequence_" + str(i+1): {"match_" + str(j+1): {"start": df.loc[match[0],'datetime'], "end": df.loc[match[1],'datetime']} 
+                                   for j, match in enumerate(sequence)} for i, sequence in enumerate(matches)}
+print('matches dict: ',matches_dict)
+
+#print all start times of matches
+for i,sequence in enumerate(matches):
+    print(f'sequence {i+1}: ')
+    for j,match in enumerate(sequence):
+        print(df.loc[match[0],'datetime'])
+#sequence 1 starts:
+#2023-06-29 13:55:47.659475
+#2023-06-29 13:55:59.475904
+#2023-06-29 13:56:11.238479
+#2023-06-29 13:56:22.936184
+#2023-06-29 13:56:34.268945
